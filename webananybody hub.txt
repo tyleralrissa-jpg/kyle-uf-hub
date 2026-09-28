@@ -1,0 +1,1708 @@
+-- ──────────────────────────────────────────────────────────────────────
+--  CONFIGURATION  ────────────────────────────────────────────────────
+--  Set to true  → Play the galaxy intro first, then load the hub.
+--  Set to false → Skip intro and load the hub immediately.
+-- ──────────────────────────────────────────────────────────────────────
+local SHOW_INTRO = false  -- <-- INTRO IS DISABLED
+-- ──────────────────────────────────────────────────────────────────────
+
+
+-- ════════════════════════════════════════════════════════════════════
+--  PART 1 : MAIN HUB SOURCE (fully embedded)
+-- ════════════════════════════════════════════════════════════════════
+local function LoadMainHub()
+    -- ── CONFIGURATION & STATE DEFAULTS ────────────────────────────────
+    local WALK_SPEED_ENABLED    = true
+    local CUSTOM_WALKSPEED      = 21.5
+    local DEFAULT_WALKSPEED     = 21.0
+
+    local JUMP_SPEED_ENABLED    = true
+    local JUMP_MULTIPLIER       = 1.0
+    local BASE_JUMP_POWER       = 50.0
+    local JUMP_POWER_MULTIPLIER = 2.2
+    local JUMP_COOLDOWN         = 1.0
+    local SUPER_FALL_GRAVITY    = 220
+    local NORMAL_GRAVITY        = 196.2
+
+    local PROX_GRAVITY_ENABLED  = true
+    local TRIGGER_RADIUS        = 40.0
+    local LOW_GRAVITY           = 192.0
+    local DEFAULT_GRAVITY       = 196.2
+
+    local BALL_NAME             = "Football"
+    local TAG_NAME              = "Football"
+
+    local HITBOX_ENABLED        = true
+    local HITBOX_SIZE           = 2.3
+    local DEFAULT_HITBOX_SIZE   = Vector3.new(2, 2, 1)
+
+    local TR_ENABLED            = true
+    local TR_SIZE               = 4.0
+    local TR_TRANS              = 1
+
+    local STICKY_HEAD_ENABLED   = false
+    local STICKY_PULL           = 1.7
+    local STICKY_POWER          = 1.4
+    local BOOST_POWER           = 36.0
+    local BOOST_COOLDOWN        = 4.0
+    local RANDOM_BOOST_ENABLED  = false
+
+    local TOGGLE_KEY            = Enum.KeyCode.T
+
+    local isAirborne       = false
+    local lockedInAir      = false
+    local cachedBall       = nil
+    local onBoostCooldown  = false
+    local boostCdRemaining = 0
+    local playerJumpStates = {}
+    local playerJumpTimers = {}
+
+    local lastHitboxUpdate = 0
+    local lastReachUpdate  = 0
+    local lastBallSearch   = 0
+
+    -- ── SERVICES ──────────────────────────────────────────────────────
+    local Players           = game:GetService("Players")
+    local RunService        = game:GetService("RunService")
+    local UserInputService  = game:GetService("UserInputService")
+    local CollectionService = game:GetService("CollectionService")
+    local Workspace         = game:GetService("Workspace")
+    local TweenService      = game:GetService("TweenService")
+
+    local plr = Players.LocalPlayer
+    local configRefreshers = {}
+
+    -- ── CONFIG SAVE / LOAD ──────────────────────────────────────────────
+    local HttpService = game:GetService("HttpService")
+    local CONFIG_FOLDER = "webanybody_configs"
+
+    local function configFileName(name)
+        name = tostring(name or ""):gsub("[^%w_%-%s]", ""):gsub("%s+", "_")
+        if name == "" then name = "default" end
+        return CONFIG_FOLDER .. "/" .. name .. ".json", name
+    end
+
+    local function canUseFiles()
+        return type(writefile) == "function" and type(readfile) == "function"
+            and type(isfile) == "function" and type(makefolder) == "function"
+            and type(isfolder) == "function"
+    end
+
+    local function ensureConfigFolder()
+        if not canUseFiles() then return false end
+        if not isfolder(CONFIG_FOLDER) then
+            pcall(makefolder, CONFIG_FOLDER)
+        end
+        return isfolder(CONFIG_FOLDER)
+    end
+
+    local function listSavedConfigs()
+        if not ensureConfigFolder() then return {} end
+        local names = {}
+        local ok, files = pcall(function()
+            if type(listfiles) == "function" then
+                return listfiles(CONFIG_FOLDER)
+            elseif type(listfolder) == "function" then
+                return listfolder(CONFIG_FOLDER)
+            end
+            return nil
+        end)
+        if ok and type(files) == "table" then
+            for _, path in ipairs(files) do
+                local pathStr = tostring(path)
+                if pathStr:lower():match("%.json$") then
+                    local name = pathStr:match("([^/\\]+)%.json$") or pathStr:match("([^/\\]+)$")
+                    if name and name ~= "" and name ~= "last" then
+                        table.insert(names, name)
+                    end
+                end
+            end
+        end
+        table.sort(names, function(a, b) return a:lower() < b:lower() end)
+        return names
+    end
+
+    local function deleteConfig(name)
+        if not ensureConfigFolder() then return false, "File system not supported." end
+        local path = select(1, configFileName(name))
+        if not isfile(path) then return false, "Config not found." end
+        if type(delfile) == "function" then
+            local ok = pcall(delfile, path)
+            if ok then return true, "Deleted: " .. tostring(name) end
+            return false, "Could not delete config."
+        end
+        return false, "Delete not supported by this executor."
+    end
+
+    local function getConfigData()
+        return {
+            WALK_SPEED_ENABLED = WALK_SPEED_ENABLED,
+            CUSTOM_WALKSPEED = CUSTOM_WALKSPEED,
+            JUMP_SPEED_ENABLED = JUMP_SPEED_ENABLED,
+            JUMP_MULTIPLIER = JUMP_MULTIPLIER,
+            JUMP_POWER_MULTIPLIER = JUMP_POWER_MULTIPLIER,
+            SUPER_FALL_GRAVITY = SUPER_FALL_GRAVITY,
+            PROX_GRAVITY_ENABLED = PROX_GRAVITY_ENABLED,
+            TRIGGER_RADIUS = TRIGGER_RADIUS,
+            LOW_GRAVITY = LOW_GRAVITY,
+            HITBOX_ENABLED = HITBOX_ENABLED,
+            HITBOX_SIZE = HITBOX_SIZE,
+            TR_ENABLED = TR_ENABLED,
+            TR_SIZE = TR_SIZE,
+            TR_TRANS = TR_TRANS,
+            STICKY_HEAD_ENABLED = STICKY_HEAD_ENABLED,
+            STICKY_PULL = STICKY_PULL,
+            STICKY_POWER = STICKY_POWER,
+            BOOST_POWER = BOOST_POWER,
+            BOOST_COOLDOWN = BOOST_COOLDOWN,
+            RANDOM_BOOST_ENABLED = RANDOM_BOOST_ENABLED
+        }
+    end
+
+    local function applyConfig(data)
+        if type(data) ~= "table" then return false end
+        local bools = {
+            "WALK_SPEED_ENABLED", "JUMP_SPEED_ENABLED", "PROX_GRAVITY_ENABLED",
+            "HITBOX_ENABLED", "TR_ENABLED", "STICKY_HEAD_ENABLED", "RANDOM_BOOST_ENABLED"
+        }
+        local nums = {
+            "CUSTOM_WALKSPEED", "JUMP_MULTIPLIER", "JUMP_POWER_MULTIPLIER",
+            "SUPER_FALL_GRAVITY", "TRIGGER_RADIUS", "LOW_GRAVITY", "HITBOX_SIZE",
+            "TR_SIZE", "TR_TRANS", "STICKY_PULL", "STICKY_POWER", "BOOST_POWER",
+            "BOOST_COOLDOWN"
+        }
+        for _, key in ipairs(bools) do
+            if type(data[key]) == "boolean" then _G[key] = data[key] end
+        end
+        for _, key in ipairs(nums) do
+            if type(data[key]) == "number" then _G[key] = data[key] end
+        end
+        return true
+    end
+
+    local function loadLastConfig()
+        if not ensureConfigFolder() then return end
+        local lastPath = CONFIG_FOLDER .. "/last.txt"
+        if isfile(lastPath) then
+            local name = readfile(lastPath)
+            local path = configFileName(name)
+            if isfile(path) then
+                local ok, data = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+                if ok and type(data) == "table" then
+                    for key, value in pairs(data) do
+                        if type(value) == "boolean" or type(value) == "number" then
+                            if key == "WALK_SPEED_ENABLED" then WALK_SPEED_ENABLED = value
+                            elseif key == "CUSTOM_WALKSPEED" then CUSTOM_WALKSPEED = value
+                            elseif key == "JUMP_SPEED_ENABLED" then JUMP_SPEED_ENABLED = value
+                            elseif key == "JUMP_MULTIPLIER" then JUMP_MULTIPLIER = value
+                            elseif key == "JUMP_POWER_MULTIPLIER" then JUMP_POWER_MULTIPLIER = value
+                            elseif key == "SUPER_FALL_GRAVITY" then SUPER_FALL_GRAVITY = value
+                            elseif key == "PROX_GRAVITY_ENABLED" then PROX_GRAVITY_ENABLED = value
+                            elseif key == "TRIGGER_RADIUS" then TRIGGER_RADIUS = value
+                            elseif key == "LOW_GRAVITY" then LOW_GRAVITY = value
+                            elseif key == "HITBOX_ENABLED" then HITBOX_ENABLED = value
+                            elseif key == "HITBOX_SIZE" then HITBOX_SIZE = value
+                            elseif key == "TR_ENABLED" then TR_ENABLED = value
+                            elseif key == "TR_SIZE" then TR_SIZE = value
+                            elseif key == "TR_TRANS" then TR_TRANS = value
+                            elseif key == "STICKY_HEAD_ENABLED" then STICKY_HEAD_ENABLED = value
+                            elseif key == "STICKY_PULL" then STICKY_PULL = value
+                            elseif key == "STICKY_POWER" then STICKY_POWER = value
+                            elseif key == "BOOST_POWER" then BOOST_POWER = value
+                            elseif key == "BOOST_COOLDOWN" then BOOST_COOLDOWN = value
+                            elseif key == "RANDOM_BOOST_ENABLED" then RANDOM_BOOST_ENABLED = value end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local function saveConfig(name)
+        if not ensureConfigFolder() then return false, "File saving is not supported by this executor." end
+        local path, cleanName = configFileName(name)
+        local ok, encoded = pcall(function() return HttpService:JSONEncode({
+            WALK_SPEED_ENABLED = WALK_SPEED_ENABLED,
+            CUSTOM_WALKSPEED = CUSTOM_WALKSPEED,
+            JUMP_SPEED_ENABLED = JUMP_SPEED_ENABLED,
+            JUMP_MULTIPLIER = JUMP_MULTIPLIER,
+            JUMP_POWER_MULTIPLIER = JUMP_POWER_MULTIPLIER,
+            SUPER_FALL_GRAVITY = SUPER_FALL_GRAVITY,
+            PROX_GRAVITY_ENABLED = PROX_GRAVITY_ENABLED,
+            TRIGGER_RADIUS = TRIGGER_RADIUS,
+            LOW_GRAVITY = LOW_GRAVITY,
+            HITBOX_ENABLED = HITBOX_ENABLED,
+            HITBOX_SIZE = HITBOX_SIZE,
+            TR_ENABLED = TR_ENABLED,
+            TR_SIZE = TR_SIZE,
+            TR_TRANS = TR_TRANS,
+            STICKY_HEAD_ENABLED = STICKY_HEAD_ENABLED,
+            STICKY_PULL = STICKY_PULL,
+            STICKY_POWER = STICKY_POWER,
+            BOOST_POWER = BOOST_POWER,
+            BOOST_COOLDOWN = BOOST_COOLDOWN,
+            RANDOM_BOOST_ENABLED = RANDOM_BOOST_ENABLED
+        }) end)
+        if not ok then return false, "Could not encode config." end
+        local wrote = pcall(writefile, path, encoded)
+        if wrote then pcall(writefile, CONFIG_FOLDER .. "/last.txt", cleanName) end
+        return wrote, wrote and ("Saved: " .. cleanName) or "Could not save config."
+    end
+
+    local function loadConfig(name)
+        if not ensureConfigFolder() then return false, "File loading is not supported by this executor." end
+        local path = configFileName(name)
+        if not isfile(path) then return false, "Config not found." end
+        local ok, data = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+        if not ok or type(data) ~= "table" then return false, "Invalid config file." end
+        for key, value in pairs(data) do
+            if key == "WALK_SPEED_ENABLED" then WALK_SPEED_ENABLED = value
+            elseif key == "CUSTOM_WALKSPEED" then CUSTOM_WALKSPEED = value
+            elseif key == "JUMP_SPEED_ENABLED" then JUMP_SPEED_ENABLED = value
+            elseif key == "JUMP_MULTIPLIER" then JUMP_MULTIPLIER = value
+            elseif key == "JUMP_POWER_MULTIPLIER" then JUMP_POWER_MULTIPLIER = value
+            elseif key == "SUPER_FALL_GRAVITY" then SUPER_FALL_GRAVITY = value
+            elseif key == "PROX_GRAVITY_ENABLED" then PROX_GRAVITY_ENABLED = value
+            elseif key == "TRIGGER_RADIUS" then TRIGGER_RADIUS = value
+            elseif key == "LOW_GRAVITY" then LOW_GRAVITY = value
+            elseif key == "HITBOX_ENABLED" then HITBOX_ENABLED = value
+            elseif key == "HITBOX_SIZE" then HITBOX_SIZE = value
+            elseif key == "TR_ENABLED" then TR_ENABLED = value
+            elseif key == "TR_SIZE" then TR_SIZE = value
+            elseif key == "TR_TRANS" then TR_TRANS = value
+            elseif key == "STICKY_HEAD_ENABLED" then STICKY_HEAD_ENABLED = value
+            elseif key == "STICKY_PULL" then STICKY_PULL = value
+            elseif key == "STICKY_POWER" then STICKY_POWER = value
+            elseif key == "BOOST_POWER" then BOOST_POWER = value
+            elseif key == "BOOST_COOLDOWN" then BOOST_COOLDOWN = value
+            elseif key == "RANDOM_BOOST_ENABLED" then RANDOM_BOOST_ENABLED = value end
+        end
+        pcall(writefile, CONFIG_FOLDER .. "/last.txt", tostring(name))
+        for _, refresh in ipairs(configRefreshers) do
+            pcall(refresh)
+        end
+        return true, "Loaded: " .. tostring(name)
+    end
+
+    loadLastConfig()
+
+    local parentGui = (syn and syn.protect_gui and game:GetService("CoreGui")) 
+        or (gethui and gethui()) 
+        or plr:WaitForChild("PlayerGui")
+
+    if parentGui:FindFirstChild("JZHubUI") then
+        parentGui:FindFirstChild("JZHubUI"):Destroy()
+    end
+
+    -- ── CHARACTER MANAGEMENT ──────────────────────────────────────────
+    local character, humanoid, root
+
+    local function setupCharacter(char)
+        character = char
+        humanoid  = char:WaitForChild("Humanoid", 10)
+        root      = char:WaitForChild("HumanoidRootPart", 10)
+
+        if humanoid then
+            humanoid.UseJumpPower = true
+
+            humanoid.StateChanged:Connect(function(_, newState)
+                if newState == Enum.HumanoidStateType.Freefall or newState == Enum.HumanoidStateType.Jumping then
+                    isAirborne = true
+                    if Workspace.Gravity == LOW_GRAVITY then
+                        lockedInAir = true
+                    end
+                elseif newState == Enum.HumanoidStateType.Landed then
+                    isAirborne = false
+                    lockedInAir = false
+                end
+            end)
+
+            humanoid.Died:Connect(function()
+                humanoid = nil
+                root     = nil
+            end)
+        end
+    end
+
+    if plr.Character then setupCharacter(plr.Character) end
+    plr.CharacterAdded:Connect(setupCharacter)
+
+    -- ── BALL DETECTION LOGIC ──────────────────────────────────────────
+    local function isValidBall(part)
+        if not part or not part:IsA("BasePart") then return false end
+        if not part:IsDescendantOf(workspace) then
+            local char = plr.Character
+            if char and part:IsDescendantOf(char) then
+                local lowerName = part.Name:lower()
+                if lowerName:find("ball") or lowerName:find("football") then
+                    return true
+                end
+            end
+            return false
+        end
+        return true
+    end
+
+    local function findActiveBall()
+        local char = plr.Character
+        if char then
+            for _, desc in ipairs(char:GetDescendants()) do
+                if desc:IsA("BasePart") then
+                    local lowerName = desc.Name:lower()
+                    if lowerName:find("ball") or lowerName:find("football") then
+                        return desc
+                    end
+                end
+            end
+        end
+
+        local tagged = CollectionService:GetTagged(TAG_NAME)
+        for _, obj in ipairs(tagged) do
+            if isValidBall(obj) then return obj end
+        end
+        
+        local found = workspace:FindFirstChild(BALL_NAME, true)
+        if isValidBall(found) then return found end
+
+        for _, folderName in pairs({"Games", "MiniGames", "Live", "Balls", "Workspace", "Active", "Field"}) do
+            local folder = workspace:FindFirstChild(folderName)
+            if folder then
+                local folderBall = folder:FindFirstChild(BALL_NAME, true)
+                if isValidBall(folderBall) then return folderBall end
+            end
+        end
+
+        for _, desc in ipairs(workspace:GetDescendants()) do
+            if desc:IsA("BasePart") and (desc.Name:lower():find("ball") or desc.Name:lower():find("football")) then
+                if isValidBall(desc) then return desc end
+            end
+        end
+        
+        return nil
+    end
+
+    CollectionService:GetInstanceAddedSignal(TAG_NAME):Connect(function(obj)
+        if isValidBall(obj) then cachedBall = obj end
+    end)
+
+    workspace.ChildAdded:Connect(function(child)
+        if (child.Name == BALL_NAME or child.Name:lower():find("ball")) and isValidBall(child) then
+            cachedBall = child
+        end
+    end)
+
+    -- ── GAME MECHANICS LOGIC ──────────────────────────────────────────
+    RunService.Stepped:Connect(function()
+        if humanoid and humanoid.Parent then
+            local targetSpeed = WALK_SPEED_ENABLED and CUSTOM_WALKSPEED or DEFAULT_WALKSPEED
+            if humanoid.WalkSpeed ~= targetSpeed then
+                humanoid.WalkSpeed = targetSpeed
+            end
+
+            if JUMP_SPEED_ENABLED then
+                humanoid.JumpPower = BASE_JUMP_POWER * JUMP_MULTIPLIER
+            end
+        end
+    end)
+
+    local function resetHitboxes()
+        for _, v in ipairs(Players:GetPlayers()) do
+            if v ~= plr then
+                pcall(function()
+                    local hrp = v.Character and v.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.Size = DEFAULT_HITBOX_SIZE
+                        hrp.Transparency = 1
+                    end
+                end)
+            end
+        end
+    end
+
+    local function applyTackleReach()
+        if not TR_ENABLED then return end
+        local char = plr.Character
+        if not char then return end
+
+        for _, folderName in pairs({"Games", "MiniGames", "ParkMap", "ParkMatchMap"}) do
+            local folder = Workspace:FindFirstChild(folderName)
+            if folder then
+                for _, instance in pairs(folder:GetChildren()) do
+                    local rep = instance:FindFirstChild("Replicated")
+                    if rep and rep:FindFirstChild("Hitboxes") then
+                        for _, part in pairs(rep.Hitboxes:GetChildren()) do
+                            if part:IsA("BasePart") and (part.Name == plr.Name or part.Name == tostring(plr.UserId)) then
+                                if part.Size ~= Vector3.new(TR_SIZE, TR_SIZE * 1.5, TR_SIZE) then
+                                    part.Size = Vector3.new(TR_SIZE, TR_SIZE * 1.5, TR_SIZE)
+                                    part.Transparency = TR_TRANS
+                                    part.Material = Enum.Material.Neon
+                                    part.Color = Color3.fromRGB(220, 35, 35)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- ── STICKY HEAD HELPER FUNCTIONS ──────────────────────────────────
+    local function getClosestPlayer()
+        local nearest = nil
+        local minDist = 35
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= plr and p.Character then
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                local hum = p.Character:FindFirstChild("Humanoid")
+                if hrp and hum and hum.Health > 0 and root then
+                    local d = (hrp.Position - root.Position).Magnitude
+                    if d < minDist then
+                        minDist = d
+                        nearest = p
+                    end
+                end
+            end
+        end
+        return nearest
+    end
+
+    local function doHeadBoost(rootPart)
+        onBoostCooldown = true
+        boostCdRemaining = BOOST_COOLDOWN
+
+        local bv = Instance.new("BodyVelocity")
+        bv.Velocity = Vector3.new(0, BOOST_POWER, 0)
+        bv.MaxForce = Vector3.new(0, 9e9, 0)
+        bv.Parent = rootPart
+        task.wait(0.2)
+        if bv then bv:Destroy() end
+
+        task.delay(BOOST_COOLDOWN, function()
+            onBoostCooldown = false
+        end)
+    end
+
+    local function checkFeetOnHead(myHRP, theirHead)
+        local myFeetY = myHRP.Position.Y - (myHRP.Size.Y / 2)
+        local headTopY = theirHead.Position.Y + (theirHead.Size.Y / 2)
+
+        local dy = myFeetY - headTopY
+        if dy < -0.5 or dy > 2 then return false end
+
+        local dx = math.abs(myHRP.Position.X - theirHead.Position.X)
+        local dz = math.abs(myHRP.Position.Z - theirHead.Position.Z)
+        local halfX = theirHead.Size.X / 2 + 0.5
+        local halfZ = theirHead.Size.Z / 2 + 0.5
+
+        return dx <= halfX and dz <= halfZ
+    end
+
+    -- ── JUMP IMPULSE ──────────────────────────────────────────────────
+    local jumpOnCD = false
+    UserInputService.JumpRequest:Connect(function()
+        if not character or not root then return end
+
+        if JUMP_SPEED_ENABLED and JUMP_MULTIPLIER > 1.0 and humanoid and humanoid:GetState() ~= Enum.HumanoidStateType.Freefall then
+            local speedBoost = (JUMP_MULTIPLIER - 1) * 18
+            root.AssemblyLinearVelocity = Vector3.new(
+                root.AssemblyLinearVelocity.X,
+                root.AssemblyLinearVelocity.Y + speedBoost,
+                root.AssemblyLinearVelocity.Z
+            )
+        end
+
+        if not jumpOnCD then
+            jumpOnCD = true
+            root:ApplyImpulse(Vector3.new(0, JUMP_POWER_MULTIPLIER * root.AssemblyMass, 0))
+            task.wait(JUMP_COOLDOWN)
+            jumpOnCD = false
+        end
+    end)
+
+    -- ── UI SETUP (REFINED DARK CHERRY) ─────────────────────────────────
+    local function corner(p, r)
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, r or 10)
+        c.Parent = p
+        return c
+    end
+
+    local function stroke(p, col, t)
+        local s = Instance.new("UIStroke")
+        s.Color = col or Color3.fromRGB(200, 40, 50)
+        s.Thickness = t or 1
+        s.Transparency = 0.15
+        s.Parent = p
+        return s
+    end
+
+    local function addGradient(parent, color1, color2, rotation)
+        local g = Instance.new("UIGradient")
+        g.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, color1),
+            ColorSequenceKeypoint.new(1, color2)
+        })
+        g.Rotation = rotation or 90
+        g.Parent = parent
+        return g
+    end
+
+    -- Refined palette
+    local COL_BG      = Color3.fromRGB(14, 14, 18)
+    local COL_HEADER  = Color3.fromRGB(22, 16, 18)
+    local COL_ROW     = Color3.fromRGB(22, 22, 28)
+    local COL_ROW_HOVER = Color3.fromRGB(28, 26, 34)
+    local COL_INPUT   = Color3.fromRGB(32, 26, 28)
+    local COL_ON      = Color3.fromRGB(230, 50, 60)
+    local COL_OFF     = Color3.fromRGB(48, 36, 40)
+    local COL_ACCENT  = Color3.fromRGB(255, 75, 85)
+    local COL_TXT     = Color3.fromRGB(240, 238, 242)
+    local COL_DIM     = Color3.fromRGB(140, 125, 130)
+    local COL_SUCCESS = Color3.fromRGB(70, 200, 110)
+    local COL_WARN    = Color3.fromRGB(220, 90, 90)
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name           = "JZHubUI"
+    sg.ResetOnSpawn   = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent         = parentGui
+
+    -- Soft shadow behind panel
+    local shadow = Instance.new("Frame")
+    shadow.Name = "Shadow"
+    shadow.Size = UDim2.new(0, 330, 0, 540)
+    shadow.Position = UDim2.new(0.5, -160, 0.5, -265)
+    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.BackgroundTransparency = 0.55
+    shadow.BorderSizePixel = 0
+    shadow.ZIndex = 0
+    shadow.Parent = sg
+    corner(shadow, 16)
+
+    local panel = Instance.new("Frame")
+    panel.Name             = "Panel"
+    panel.Size             = UDim2.new(0, 318, 0, 528)
+    panel.Position         = UDim2.new(0.5, -159, 0.5, -264)
+    panel.BackgroundColor3 = COL_BG
+    panel.BorderSizePixel  = 0
+    panel.ClipsDescendants = true
+    panel.ZIndex           = 1
+    panel.Parent           = sg
+    corner(panel, 14)
+    stroke(panel, Color3.fromRGB(200, 45, 55), 1.4)
+
+    -- Subtle top-to-bottom gradient on panel
+    addGradient(panel, Color3.fromRGB(18, 16, 20), Color3.fromRGB(12, 12, 16), 90)
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Name             = "TitleBar"
+    titleBar.Size             = UDim2.new(1, 0, 0, 58)
+    titleBar.BackgroundColor3 = COL_HEADER
+    titleBar.BorderSizePixel  = 0
+    titleBar.ZIndex           = 5
+    titleBar.Parent           = panel
+    corner(titleBar, 14)
+    stroke(titleBar, Color3.fromRGB(55, 28, 32), 1)
+    addGradient(titleBar, Color3.fromRGB(32, 18, 22), Color3.fromRGB(18, 14, 16), 90)
+
+    -- Bottom fade line under title bar
+    local titleFade = Instance.new("Frame")
+    titleFade.Size = UDim2.new(1, 0, 0, 12)
+    titleFade.Position = UDim2.new(0, 0, 1, -1)
+    titleFade.BackgroundColor3 = COL_HEADER
+    titleFade.BorderSizePixel = 0
+    titleFade.ZIndex = 4
+    titleFade.Parent = titleBar
+    local fadeGrad = Instance.new("UIGradient")
+    fadeGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(1, 1)
+    })
+    fadeGrad.Rotation = 90
+    fadeGrad.Parent = titleFade
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size                = UDim2.new(0, 160, 0, 24)
+    titleLbl.Position            = UDim2.new(0, 18, 0, 8)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text                = "webanybody"
+    titleLbl.TextColor3          = COL_ACCENT
+    titleLbl.TextSize            = 16
+    titleLbl.Font                = Enum.Font.GothamBold
+    titleLbl.TextXAlignment      = Enum.TextXAlignment.Left
+    titleLbl.ZIndex              = 6
+    titleLbl.Parent              = titleBar
+
+    local subtitleLbl = Instance.new("TextLabel")
+    subtitleLbl.Size                = UDim2.new(0, 180, 0, 16)
+    subtitleLbl.Position            = UDim2.new(0, 18, 0, 32)
+    subtitleLbl.BackgroundTransparency = 1
+    subtitleLbl.Text                = "Field & Movement System"
+    subtitleLbl.TextColor3          = COL_DIM
+    subtitleLbl.TextSize            = 11
+    subtitleLbl.Font                = Enum.Font.Gotham
+    subtitleLbl.TextXAlignment      = Enum.TextXAlignment.Left
+    subtitleLbl.ZIndex              = 6
+    subtitleLbl.Parent              = titleBar
+
+    local keyBadge = Instance.new("TextLabel")
+    keyBadge.Size                = UDim2.new(0, 108, 0, 26)
+    keyBadge.Position            = UDim2.new(1, -122, 0.5, -13)
+    keyBadge.BackgroundColor3    = Color3.fromRGB(40, 22, 26)
+    keyBadge.Text                = "RB:Stk  •  LB:Spd"
+    keyBadge.TextColor3          = COL_ACCENT
+    keyBadge.TextSize            = 11
+    keyBadge.Font                = Enum.Font.GothamBold
+    keyBadge.ZIndex              = 6
+    keyBadge.Parent              = titleBar
+    corner(keyBadge, 7)
+    stroke(keyBadge, Color3.fromRGB(180, 40, 50), 1)
+
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = panel.Position
+            shadow.Position = panel.Position + UDim2.new(0, 1, 0, 1)
+        end
+    end)
+
+    titleBar.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            local newPos = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            panel.Position = newPos
+            shadow.Position = newPos + UDim2.new(0, 1, 0, 1)
+        end
+    end)
+
+    local list = Instance.new("ScrollingFrame")
+    list.Size                   = UDim2.new(1, 0, 1, -62)
+    list.Position               = UDim2.new(0, 0, 0, 58)
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel        = 0
+    list.ScrollBarThickness     = 3
+    list.ScrollBarImageColor3   = Color3.fromRGB(200, 45, 55)
+    list.ScrollBarImageTransparency = 0.3
+    list.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+    list.CanvasSize             = UDim2.new(0, 0, 0, 0)
+    list.Parent                 = panel
+
+    local uiLayout = Instance.new("UIListLayout")
+    uiLayout.Padding              = UDim.new(0, 7)
+    uiLayout.SortOrder            = Enum.SortOrder.LayoutOrder
+    uiLayout.HorizontalAlignment  = Enum.HorizontalAlignment.Center
+    uiLayout.Parent               = list
+
+    local uiPad = Instance.new("UIPadding")
+    uiPad.PaddingTop    = UDim.new(0, 10)
+    uiPad.PaddingBottom = UDim.new(0, 16)
+    uiPad.PaddingLeft   = UDim.new(0, 14)
+    uiPad.PaddingRight  = UDim.new(0, 14)
+    uiPad.Parent        = list
+
+    local rowOrder = 0
+
+    local function makeDivider(text)
+        rowOrder += 1
+        local div = Instance.new("Frame")
+        div.LayoutOrder         = rowOrder
+        div.Size                = UDim2.new(1, 0, 0, 24)
+        div.BackgroundTransparency = 1
+        div.BorderSizePixel     = 0
+        div.Parent              = list
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size                = UDim2.new(1, 0, 1, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text                = "—  " .. text .. "  —"
+        lbl.TextColor3          = COL_ACCENT
+        lbl.TextSize            = 11
+        lbl.Font                = Enum.Font.GothamBold
+        lbl.TextXAlignment      = Enum.TextXAlignment.Center
+        lbl.Parent              = div
+    end
+
+    local function makeBoolRow(labelText, getVal, setVal)
+        rowOrder += 1
+        local row = Instance.new("Frame")
+        row.LayoutOrder         = rowOrder
+        row.Size                = UDim2.new(1, 0, 0, 40)
+        row.BackgroundColor3    = COL_ROW
+        row.BorderSizePixel     = 0
+        row.Parent              = list
+        corner(row, 9)
+        stroke(row, Color3.fromRGB(40, 36, 48), 1)
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size                = UDim2.new(0.58, 0, 1, 0)
+        lbl.Position            = UDim2.new(0, 14, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text                = labelText
+        lbl.TextColor3          = COL_TXT
+        lbl.TextSize            = 13
+        lbl.Font                = Enum.Font.GothamMedium
+        lbl.TextXAlignment      = Enum.TextXAlignment.Left
+        lbl.Parent              = row
+
+        local btn = Instance.new("TextButton")
+        btn.Size              = UDim2.new(0, 72, 0, 26)
+        btn.Position          = UDim2.new(1, -84, 0.5, -13)
+        btn.BorderSizePixel   = 0
+        btn.AutoButtonColor   = false
+        btn.TextSize          = 12
+        btn.Font              = Enum.Font.GothamBold
+        btn.TextColor3        = Color3.fromRGB(255, 255, 255)
+        btn.Parent            = row
+        corner(btn, 7)
+
+        local function refresh()
+            local v = getVal()
+            btn.Text             = v and "ON" or "OFF"
+            btn.BackgroundColor3 = v and COL_ON or COL_OFF
+        end
+        refresh()
+        table.insert(configRefreshers, refresh)
+
+        btn.MouseButton1Click:Connect(function()
+            setVal(not getVal())
+            refresh()
+        end)
+        return btn, refresh
+    end
+
+    local function makeNumRow(labelText, getVal, setVal, suffix, minVal, maxVal)
+        rowOrder += 1
+        suffix = suffix or ""
+
+        local row = Instance.new("Frame")
+        row.LayoutOrder         = rowOrder
+        row.Size                = UDim2.new(1, 0, 0, 40)
+        row.BackgroundColor3    = COL_ROW
+        row.BorderSizePixel     = 0
+        row.Parent              = list
+        corner(row, 9)
+        stroke(row, Color3.fromRGB(40, 36, 48), 1)
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size                = UDim2.new(0.55, 0, 1, 0)
+        lbl.Position            = UDim2.new(0, 14, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text                = labelText
+        lbl.TextColor3          = COL_TXT
+        lbl.TextSize            = 13
+        lbl.Font                = Enum.Font.GothamMedium
+        lbl.TextXAlignment      = Enum.TextXAlignment.Left
+        lbl.Parent              = row
+
+        local inputBG = Instance.new("Frame")
+        inputBG.Size             = UDim2.new(0, 82, 0, 26)
+        inputBG.Position         = UDim2.new(1, -94, 0.5, -13)
+        inputBG.BackgroundColor3 = COL_INPUT
+        inputBG.BorderSizePixel  = 0
+        inputBG.Parent           = row
+        corner(inputBG, 7)
+        local inputStroke = stroke(inputBG, Color3.fromRGB(55, 45, 60), 1)
+
+        local tb = Instance.new("TextBox")
+        tb.Size               = UDim2.new(1, -10, 1, 0)
+        tb.Position           = UDim2.new(0, 5, 0, 0)
+        tb.BackgroundTransparency = 1
+        tb.BorderSizePixel    = 0
+        tb.Text               = tostring(getVal()) .. suffix
+        tb.TextColor3         = COL_TXT
+        tb.PlaceholderColor3  = COL_DIM
+        tb.TextSize           = 12
+        tb.Font               = Enum.Font.GothamMedium
+        tb.ClearTextOnFocus   = false
+        tb.Parent             = inputBG
+
+        local function refresh()
+            tb.Text = tostring(getVal()) .. suffix
+        end
+        table.insert(configRefreshers, refresh)
+
+        tb.Focused:Connect(function()
+            inputStroke.Color = COL_ACCENT
+            inputStroke.Transparency = 0
+            tb.Text = tostring(getVal())
+        end)
+
+        tb.FocusLost:Connect(function()
+            local raw = tb.Text:gsub("[^%d%.%-]", "")
+            local num = tonumber(raw)
+            if num then
+                if minVal then num = math.max(minVal, num) end
+                if maxVal then num = math.min(maxVal, num) end
+                setVal(num)
+                inputStroke.Color = COL_ON
+                tb.Text = tostring(num) .. suffix
+            else
+                inputStroke.Color = COL_OFF
+                tb.Text = tostring(getVal()) .. suffix
+            end
+            task.delay(0.6, function()
+                inputStroke.Color = Color3.fromRGB(55, 45, 60)
+                inputStroke.Transparency = 0.15
+            end)
+        end)
+
+        return tb
+    end
+
+    local function makeSliderRow(labelText, minVal, maxVal, getVal, setVal)
+        rowOrder += 1
+
+        local card = Instance.new("Frame")
+        card.LayoutOrder      = rowOrder
+        card.Size             = UDim2.new(1, 0, 0, 56)
+        card.BackgroundColor3 = COL_ROW
+        card.BorderSizePixel  = 0
+        card.Parent           = list
+        corner(card, 9)
+        stroke(card, Color3.fromRGB(40, 36, 48), 1)
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size                = UDim2.new(0.58, 0, 0, 22)
+        lbl.Position            = UDim2.new(0, 14, 0, 6)
+        lbl.BackgroundTransparency = 1
+        lbl.Text                = labelText
+        lbl.TextColor3          = COL_TXT
+        lbl.TextSize            = 13
+        lbl.Font                = Enum.Font.GothamMedium
+        lbl.TextXAlignment      = Enum.TextXAlignment.Left
+        lbl.Parent              = card
+
+        local valLbl = Instance.new("TextLabel")
+        valLbl.Size                = UDim2.new(0.35, -12, 0, 22)
+        valLbl.Position            = UDim2.new(0.65, 0, 0, 6)
+        valLbl.BackgroundTransparency = 1
+        valLbl.Text                = string.format("%.1f", getVal())
+        valLbl.TextColor3          = COL_ACCENT
+        valLbl.TextSize            = 13
+        valLbl.Font                = Enum.Font.GothamBold
+        valLbl.TextXAlignment      = Enum.TextXAlignment.Right
+        valLbl.Parent              = card
+
+        local track = Instance.new("Frame")
+        track.Name             = "Track"
+        track.Size             = UDim2.new(1, -28, 0, 8)
+        track.Position         = UDim2.new(0, 14, 0, 36)
+        track.BackgroundColor3 = COL_INPUT
+        track.BorderSizePixel  = 0
+        track.Parent           = card
+        corner(track, 4)
+
+        local fill = Instance.new("Frame")
+        fill.Name             = "Fill"
+        fill.Size             = UDim2.new((getVal() - minVal) / (maxVal - minVal), 0, 1, 0)
+        fill.BackgroundColor3 = COL_ON
+        fill.BorderSizePixel  = 0
+        fill.Parent           = track
+        corner(fill, 4)
+
+        local knob = Instance.new("Frame")
+        knob.Name             = "Knob"
+        knob.Size             = UDim2.new(0, 16, 0, 16)
+        knob.Position         = UDim2.new((getVal() - minVal) / (maxVal - minVal), -8, 0.5, -8)
+        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        knob.BorderSizePixel  = 0
+        knob.Parent           = track
+        corner(knob, 8)
+        stroke(knob, COL_ON, 1.6)
+
+        local sliding = false
+
+        local function update(input)
+            local trackPos  = track.AbsolutePosition.X
+            local trackSize = track.AbsoluteSize.X
+            local mouseX    = input.Position.X
+
+            local relativeX  = math.clamp(mouseX - trackPos, 0, trackSize)
+            local percentage = relativeX / trackSize
+            local val        = minVal + (percentage * (maxVal - minVal))
+
+            val = math.floor(val * 10 + 0.5) / 10
+
+            setVal(val)
+            fill.Size     = UDim2.new(percentage, 0, 1, 0)
+            knob.Position = UDim2.new(percentage, -8, 0.5, -8)
+            valLbl.Text   = string.format("%.1f", val)
+        end
+
+        track.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                sliding = true
+                update(input)
+            end
+        end)
+
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                sliding = false
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                update(input)
+            end
+        end)
+
+        local function refresh()
+            local percentage = math.clamp((getVal() - minVal) / (maxVal - minVal), 0, 1)
+            fill.Size = UDim2.new(percentage, 0, 1, 0)
+            knob.Position = UDim2.new(percentage, -8, 0.5, -8)
+            valLbl.Text = string.format("%.1f", getVal())
+        end
+        table.insert(configRefreshers, refresh)
+    end
+
+    -- ── UI BUILDING ───────────────────────────────────────────────────
+    makeDivider("LIVE FIELD STATUS")
+
+    rowOrder += 1
+    local statusCard = Instance.new("Frame")
+    statusCard.LayoutOrder     = rowOrder
+    statusCard.Size            = UDim2.new(1, 0, 0, 72)
+    statusCard.BackgroundColor3 = COL_ROW
+    statusCard.BorderSizePixel = 0
+    statusCard.Parent          = list
+    corner(statusCard, 10)
+    stroke(statusCard, Color3.fromRGB(40, 36, 48), 1)
+
+    local distanceLabel = Instance.new("TextLabel")
+    distanceLabel.Size                = UDim2.new(0.5, -12, 0, 34)
+    distanceLabel.Position            = UDim2.new(0, 12, 0, 6)
+    distanceLabel.BackgroundTransparency = 1
+    distanceLabel.Text                = "BALL DISTANCE\n-- studs"
+    distanceLabel.TextColor3          = COL_TXT
+    distanceLabel.TextSize            = 11
+    distanceLabel.Font                = Enum.Font.GothamMedium
+    distanceLabel.TextXAlignment      = Enum.TextXAlignment.Left
+    distanceLabel.Parent              = statusCard
+
+    local stateLabel = Instance.new("TextLabel")
+    stateLabel.Size                = UDim2.new(0.5, -12, 0, 34)
+    stateLabel.Position            = UDim2.new(0.5, 0, 0, 6)
+    stateLabel.BackgroundTransparency = 1
+    stateLabel.Text                = "STATE\nGrounded"
+    stateLabel.TextColor3          = COL_TXT
+    stateLabel.TextSize            = 11
+    stateLabel.Font                = Enum.Font.GothamMedium
+    stateLabel.TextXAlignment      = Enum.TextXAlignment.Right
+    stateLabel.Parent              = statusCard
+
+    local boostStateLabel = Instance.new("TextLabel")
+    boostStateLabel.Size                = UDim2.new(1, -24, 0, 24)
+    boostStateLabel.Position            = UDim2.new(0, 12, 0, 42)
+    boostStateLabel.BackgroundTransparency = 1
+    boostStateLabel.Text                = "HEAD BOOST: READY"
+    boostStateLabel.TextColor3          = COL_SUCCESS
+    boostStateLabel.TextSize            = 12
+    boostStateLabel.Font                = Enum.Font.GothamBold
+    boostStateLabel.TextXAlignment      = Enum.TextXAlignment.Center
+    boostStateLabel.Parent              = statusCard
+
+    local sepLine = Instance.new("Frame")
+    sepLine.Size = UDim2.new(1, -24, 0, 1)
+    sepLine.Position = UDim2.new(0, 12, 0, 40)
+    sepLine.BackgroundColor3 = Color3.fromRGB(45, 40, 52)
+    sepLine.BorderSizePixel = 0
+    sepLine.Parent = statusCard
+
+    rowOrder += 1
+    local gravityCard = Instance.new("Frame")
+    gravityCard.LayoutOrder      = rowOrder
+    gravityCard.Size             = UDim2.new(1, 0, 0, 40)
+    gravityCard.BackgroundColor3 = COL_ROW
+    gravityCard.BorderSizePixel  = 0
+    gravityCard.Parent           = list
+    corner(gravityCard, 9)
+    stroke(gravityCard, Color3.fromRGB(40, 36, 48), 1)
+
+    local gravityTitle = Instance.new("TextLabel")
+    gravityTitle.Size                = UDim2.new(0.5, 0, 1, 0)
+    gravityTitle.Position            = UDim2.new(0, 14, 0, 0)
+    gravityTitle.BackgroundTransparency = 1
+    gravityTitle.Text                = "Active Gravity"
+    gravityTitle.TextColor3          = COL_DIM
+    gravityTitle.TextSize            = 12
+    gravityTitle.Font                = Enum.Font.Gotham
+    gravityTitle.TextXAlignment      = Enum.TextXAlignment.Left
+    gravityTitle.Parent              = gravityCard
+
+    local gravityValue = Instance.new("TextLabel")
+    gravityValue.Size                = UDim2.new(0.5, -14, 1, 0)
+    gravityValue.Position            = UDim2.new(0.5, 0, 0, 0)
+    gravityValue.BackgroundTransparency = 1
+    gravityValue.Text                = tostring(DEFAULT_GRAVITY)
+    gravityValue.TextColor3          = COL_ON
+    gravityValue.TextSize            = 16
+    gravityValue.Font                = Enum.Font.GothamBold
+    gravityValue.TextXAlignment      = Enum.TextXAlignment.Right
+    gravityValue.Parent              = gravityCard
+
+
+    makeDivider("STICKY HEAD & BOOST  [RB]")
+    local stickyToggleBtn, refreshStickyBtn = makeBoolRow("Sticky Toggle", function() return STICKY_HEAD_ENABLED end, function(v) STICKY_HEAD_ENABLED = v end)
+    makeSliderRow("Pull Strength", 1.0, 4.1, function() return STICKY_PULL end, function(v) STICKY_PULL = v end)
+    makeSliderRow("Stickiness", 1.0, 4.1, function() return STICKY_POWER end, function(v) STICKY_POWER = v end)
+    local randomBoostBtn, refreshRandomBoostBtn = makeBoolRow("Random Boost Power", function() return RANDOM_BOOST_ENABLED end, function(v) RANDOM_BOOST_ENABLED = v end)
+    makeNumRow("Boost Power", function() return BOOST_POWER end, function(v) BOOST_POWER = v end, "", 0, 200)
+
+    makeDivider("SPEED CONTROLS  [LB]")
+    local speedToggleBtn, refreshSpeedBtn = makeBoolRow("Speed Toggle", function() return WALK_SPEED_ENABLED end, function(v)
+        WALK_SPEED_ENABLED = v
+        if humanoid then
+            humanoid.WalkSpeed = WALK_SPEED_ENABLED and CUSTOM_WALKSPEED or DEFAULT_WALKSPEED
+        end
+    end)
+    makeNumRow("WalkSpeed", function() return CUSTOM_WALKSPEED end, function(v)
+        CUSTOM_WALKSPEED = v
+        if humanoid and WALK_SPEED_ENABLED then
+            humanoid.WalkSpeed = CUSTOM_WALKSPEED
+        end
+    end, "", 0, 500)
+
+    makeDivider("JUMP SPEED CONTROLS")
+    makeBoolRow("Jump Speed Toggle", function() return JUMP_SPEED_ENABLED end, function(v)
+        JUMP_SPEED_ENABLED = v
+        if humanoid and not v then
+            humanoid.JumpPower = BASE_JUMP_POWER
+        end
+    end)
+
+    makeDivider("PROX GRAVITY & JUMP")
+    makeBoolRow("Prox Gravity", function() return PROX_GRAVITY_ENABLED end, function(v)
+        PROX_GRAVITY_ENABLED = v
+        if not v then Workspace.Gravity = DEFAULT_GRAVITY end
+    end)
+    makeNumRow("Trigger Radius", function() return TRIGGER_RADIUS end, function(v) TRIGGER_RADIUS = v end, " studs", 1, 100)
+    makeNumRow("Low Gravity", function() return LOW_GRAVITY end, function(v) LOW_GRAVITY = v end, "", 0, 500)
+    makeNumRow("Jump Multiplier", function() return JUMP_POWER_MULTIPLIER end, function(v) JUMP_POWER_MULTIPLIER = v end, "", 0, 10)
+    makeNumRow("Super Fall Grav", function() return SUPER_FALL_GRAVITY end, function(v) SUPER_FALL_GRAVITY = v end, "", 0, 1000)
+
+    makeDivider("TACKLE REACH")
+    makeBoolRow("Tackle Reach", function() return TR_ENABLED end, function(v) TR_ENABLED = v end)
+    makeNumRow("TR Size", function() return TR_SIZE end, function(v) TR_SIZE = v end, "", 1, 50)
+    makeNumRow("TR Trans", function() return TR_TRANS end, function(v) TR_TRANS = v end, "", 0, 1)
+
+    makeDivider("HITBOX EXPANSION")
+    makeBoolRow("Hitbox", function() return HITBOX_ENABLED end, function(v)
+        HITBOX_ENABLED = v
+        if not v then resetHitboxes() end
+    end)
+    makeNumRow("Hitbox Size", function() return HITBOX_SIZE end, function(v) HITBOX_SIZE = v end, "", 1, 50)
+
+
+    -- ── SAVED CONFIGS ──────────────────────────────────────────────────
+    makeDivider("SAVED CONFIGS")
+
+    rowOrder += 1
+    local configNameRow = Instance.new("Frame")
+    configNameRow.LayoutOrder = rowOrder
+    configNameRow.Size = UDim2.new(1, 0, 0, 42)
+    configNameRow.BackgroundColor3 = COL_ROW
+    configNameRow.BorderSizePixel = 0
+    configNameRow.Parent = list
+    corner(configNameRow, 9)
+    stroke(configNameRow, Color3.fromRGB(40, 36, 48), 1)
+
+    local configNameBox = Instance.new("TextBox")
+    configNameBox.Size = UDim2.new(1, -92, 0, 28)
+    configNameBox.Position = UDim2.new(0, 12, 0.5, -14)
+    configNameBox.BackgroundColor3 = COL_INPUT
+    configNameBox.BorderSizePixel = 0
+    configNameBox.Text = "my_config"
+    configNameBox.PlaceholderText = "New config name..."
+    configNameBox.TextColor3 = COL_TXT
+    configNameBox.PlaceholderColor3 = COL_DIM
+    configNameBox.TextSize = 12
+    configNameBox.Font = Enum.Font.GothamMedium
+    configNameBox.ClearTextOnFocus = false
+    configNameBox.Parent = configNameRow
+    corner(configNameBox, 7)
+    stroke(configNameBox, Color3.fromRGB(55, 45, 60), 1)
+
+    local saveBtn = Instance.new("TextButton")
+    saveBtn.Size = UDim2.new(0, 72, 0, 28)
+    saveBtn.Position = UDim2.new(1, -82, 0.5, -14)
+    saveBtn.BackgroundColor3 = COL_ON
+    saveBtn.BorderSizePixel = 0
+    saveBtn.Text = "SAVE"
+    saveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    saveBtn.TextSize = 12
+    saveBtn.Font = Enum.Font.GothamBold
+    saveBtn.AutoButtonColor = false
+    saveBtn.Parent = configNameRow
+    corner(saveBtn, 7)
+
+    rowOrder += 1
+    local configStatus = Instance.new("TextLabel")
+    configStatus.LayoutOrder = rowOrder
+    configStatus.Size = UDim2.new(1, 0, 0, 20)
+    configStatus.BackgroundTransparency = 1
+    configStatus.Text = "Click a config below to load it"
+    configStatus.TextColor3 = COL_DIM
+    configStatus.TextSize = 11
+    configStatus.Font = Enum.Font.Gotham
+    configStatus.TextXAlignment = Enum.TextXAlignment.Center
+    configStatus.Parent = list
+
+    local function setConfigStatus(text, good)
+        if configStatus then
+            configStatus.Text = text
+            configStatus.TextColor3 = good and COL_SUCCESS or (good == false and COL_WARN or COL_DIM)
+        end
+    end
+
+    rowOrder += 1
+    local listHeader = Instance.new("Frame")
+    listHeader.LayoutOrder = rowOrder
+    listHeader.Size = UDim2.new(1, 0, 0, 28)
+    listHeader.BackgroundTransparency = 1
+    listHeader.Parent = list
+
+    local listHeaderLbl = Instance.new("TextLabel")
+    listHeaderLbl.Size = UDim2.new(1, -72, 1, 0)
+    listHeaderLbl.Position = UDim2.new(0, 4, 0, 0)
+    listHeaderLbl.BackgroundTransparency = 1
+    listHeaderLbl.Text = "YOUR SAVED CONFIGS"
+    listHeaderLbl.TextColor3 = COL_ACCENT
+    listHeaderLbl.TextSize = 11
+    listHeaderLbl.Font = Enum.Font.GothamBold
+    listHeaderLbl.TextXAlignment = Enum.TextXAlignment.Left
+    listHeaderLbl.Parent = listHeader
+
+    local refreshBtn = Instance.new("TextButton")
+    refreshBtn.Size = UDim2.new(0, 66, 0, 24)
+    refreshBtn.Position = UDim2.new(1, -70, 0.5, -12)
+    refreshBtn.BackgroundColor3 = COL_INPUT
+    refreshBtn.BorderSizePixel = 0
+    refreshBtn.Text = "REFRESH"
+    refreshBtn.TextColor3 = COL_TXT
+    refreshBtn.TextSize = 10
+    refreshBtn.Font = Enum.Font.GothamBold
+    refreshBtn.AutoButtonColor = false
+    refreshBtn.Parent = listHeader
+    corner(refreshBtn, 6)
+    stroke(refreshBtn, Color3.fromRGB(55, 45, 60), 1)
+
+    local configListContainer = Instance.new("Frame")
+    configListContainer.Name = "ConfigListContainer"
+    configListContainer.BackgroundTransparency = 1
+    configListContainer.Size = UDim2.new(1, 0, 0, 0)
+    configListContainer.AutomaticSize = Enum.AutomaticSize.Y
+    configListContainer.BorderSizePixel = 0
+
+    local configListLayout = Instance.new("UIListLayout")
+    configListLayout.Padding = UDim.new(0, 5)
+    configListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    configListLayout.Parent = configListContainer
+
+    rowOrder += 1
+    configListContainer.LayoutOrder = rowOrder
+    configListContainer.Parent = list
+
+    local emptyHint = Instance.new("TextLabel")
+    emptyHint.Name = "EmptyHint"
+    emptyHint.Size = UDim2.new(1, 0, 0, 34)
+    emptyHint.BackgroundColor3 = COL_ROW
+    emptyHint.BorderSizePixel = 0
+    emptyHint.Text = "No saved configs yet — save one above"
+    emptyHint.TextColor3 = COL_DIM
+    emptyHint.TextSize = 11
+    emptyHint.Font = Enum.Font.Gotham
+    emptyHint.Parent = configListContainer
+    corner(emptyHint, 7)
+
+    local function rebuildConfigList()
+        for _, child in ipairs(configListContainer:GetChildren()) do
+            if child:IsA("Frame") or (child:IsA("TextLabel") and child.Name == "EmptyHint") then
+                child:Destroy()
+            end
+        end
+
+        local names = listSavedConfigs()
+        if #names == 0 then
+            local hint = Instance.new("TextLabel")
+            hint.Name = "EmptyHint"
+            hint.Size = UDim2.new(1, 0, 0, 34)
+            hint.BackgroundColor3 = COL_ROW
+            hint.BorderSizePixel = 0
+            hint.Text = "No saved configs yet — save one above"
+            hint.TextColor3 = COL_DIM
+            hint.TextSize = 11
+            hint.Font = Enum.Font.Gotham
+            hint.Parent = configListContainer
+            corner(hint, 7)
+            return
+        end
+
+        for i, name in ipairs(names) do
+            local row = Instance.new("Frame")
+            row.Name = "Cfg_" .. name
+            row.LayoutOrder = i
+            row.Size = UDim2.new(1, 0, 0, 38)
+            row.BackgroundColor3 = COL_ROW
+            row.BorderSizePixel = 0
+            row.Parent = configListContainer
+            corner(row, 8)
+            stroke(row, Color3.fromRGB(40, 36, 48), 1)
+
+            local nameLbl = Instance.new("TextLabel")
+            nameLbl.Size = UDim2.new(1, -104, 1, 0)
+            nameLbl.Position = UDim2.new(0, 14, 0, 0)
+            nameLbl.BackgroundTransparency = 1
+            nameLbl.Text = name
+            nameLbl.TextColor3 = COL_TXT
+            nameLbl.TextSize = 13
+            nameLbl.Font = Enum.Font.GothamMedium
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+            nameLbl.Parent = row
+
+            local loadBtn = Instance.new("TextButton")
+            loadBtn.Size = UDim2.new(0, 54, 0, 26)
+            loadBtn.Position = UDim2.new(1, -96, 0.5, -13)
+            loadBtn.BackgroundColor3 = COL_ON
+            loadBtn.BorderSizePixel = 0
+            loadBtn.Text = "LOAD"
+            loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            loadBtn.TextSize = 11
+            loadBtn.Font = Enum.Font.GothamBold
+            loadBtn.AutoButtonColor = false
+            loadBtn.Parent = row
+            corner(loadBtn, 6)
+
+            local delBtn = Instance.new("TextButton")
+            delBtn.Size = UDim2.new(0, 30, 0, 26)
+            delBtn.Position = UDim2.new(1, -38, 0.5, -13)
+            delBtn.BackgroundColor3 = Color3.fromRGB(48, 28, 30)
+            delBtn.BorderSizePixel = 0
+            delBtn.Text = "✕"
+            delBtn.TextColor3 = Color3.fromRGB(220, 110, 110)
+            delBtn.TextSize = 13
+            delBtn.Font = Enum.Font.GothamBold
+            delBtn.AutoButtonColor = false
+            delBtn.Parent = row
+            corner(delBtn, 6)
+
+            loadBtn.MouseButton1Click:Connect(function()
+                local ok, msg = loadConfig(name)
+                setConfigStatus(msg, ok)
+                if ok then
+                    configNameBox.Text = name
+                end
+            end)
+
+            local hit = Instance.new("TextButton")
+            hit.Size = UDim2.new(1, -104, 1, 0)
+            hit.BackgroundTransparency = 1
+            hit.Text = ""
+            hit.ZIndex = 2
+            hit.Parent = row
+            hit.MouseButton1Click:Connect(function()
+                local ok, msg = loadConfig(name)
+                setConfigStatus(msg, ok)
+                if ok then
+                    configNameBox.Text = name
+                end
+            end)
+
+            delBtn.MouseButton1Click:Connect(function()
+                local ok, msg = deleteConfig(name)
+                setConfigStatus(msg, ok)
+                rebuildConfigList()
+            end)
+        end
+    end
+
+    saveBtn.MouseButton1Click:Connect(function()
+        local ok, msg = saveConfig(configNameBox.Text)
+        setConfigStatus(msg, ok)
+        if ok then
+            rebuildConfigList()
+        end
+    end)
+
+    refreshBtn.MouseButton1Click:Connect(function()
+        rebuildConfigList()
+        setConfigStatus("List refreshed", true)
+        task.delay(1.2, function()
+            if configStatus and configStatus.Text == "List refreshed" then
+                setConfigStatus("Click a config below to load it", nil)
+            end
+        end)
+    end)
+
+    rebuildConfigList()
+
+
+    -- ── SYSTEM LOOPS ──────────────────────────────────────────────────
+    RunService.RenderStepped:Connect(function(dt)
+        local now = os.clock()
+
+        if TR_ENABLED and (now - lastReachUpdate > 0.1) then
+            lastReachUpdate = now
+            applyTackleReach()
+        end
+
+        if HITBOX_ENABLED and (now - lastHitboxUpdate > 0.1) then
+            lastHitboxUpdate = now
+            local targetSize = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+            for _, v in ipairs(Players:GetPlayers()) do
+                if v ~= plr then
+                    local hrp = v.Character and v.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp and hrp.Size ~= targetSize then
+                        hrp.Size = targetSize
+                        hrp.Transparency = 1
+                        hrp.Material = Enum.Material.Neon
+                        hrp.CanCollide = true
+                    end
+                end
+            end
+        end
+
+        if not cachedBall or not cachedBall.Parent or not cachedBall:IsDescendantOf(workspace) then
+            local found = findActiveBall()
+            if found then cachedBall = found end
+        end
+
+        if not cachedBall or not isValidBall(cachedBall) then
+            if now - lastBallSearch > 0.3 then
+                lastBallSearch = now
+                cachedBall = findActiveBall()
+            end
+        end
+
+        local currentDist = nil
+        if root and cachedBall and cachedBall.Parent then
+            local char = plr.Character
+            if char and cachedBall:IsDescendantOf(char) then
+                currentDist = 0.0
+            else
+                currentDist = (cachedBall.Position - root.Position).Magnitude
+            end
+            distanceLabel.Text = "BALL DISTANCE\n" .. string.format("%.1f", currentDist) .. " studs"
+        else
+            distanceLabel.Text = "BALL DISTANCE\nSearching..."
+        end
+
+        if isAirborne then
+            stateLabel.Text = "STATE\nAirborne"
+            stateLabel.TextColor3 = COL_ON
+        else
+            stateLabel.Text = "STATE\nGrounded"
+            stateLabel.TextColor3 = COL_DIM
+        end
+
+        if PROX_GRAVITY_ENABLED then
+            local char = plr.Character
+            local holdingBall = char and cachedBall and cachedBall:IsDescendantOf(char)
+            local shouldBeLowGravity = holdingBall or lockedInAir or (currentDist and currentDist <= TRIGGER_RADIUS)
+
+            if shouldBeLowGravity then
+                if Workspace.Gravity ~= LOW_GRAVITY then Workspace.Gravity = LOW_GRAVITY end
+                gravityValue.Text = string.format("%.1f", LOW_GRAVITY)
+                gravityValue.TextColor3 = COL_ON
+            else
+                if Workspace.Gravity ~= DEFAULT_GRAVITY then Workspace.Gravity = DEFAULT_GRAVITY end
+                gravityValue.Text = string.format("%.1f", DEFAULT_GRAVITY)
+                gravityValue.TextColor3 = COL_ACCENT
+            end
+        end
+
+        if humanoid and root then
+            local velY = root.AssemblyLinearVelocity.Y
+            if velY < -2 then
+                workspace.Gravity = SUPER_FALL_GRAVITY
+            elseif not PROX_GRAVITY_ENABLED then
+                workspace.Gravity = NORMAL_GRAVITY
+            end
+        end
+
+        if STICKY_HEAD_ENABLED and humanoid and root then
+            local target = getClosestPlayer()
+            if target and target.Character then
+                local targetHead = target.Character:FindFirstChild("Head")
+                if targetHead and humanoid.FloorMaterial == Enum.Material.Air then
+                    local headPos = targetHead.Position + Vector3.new(0, 1.6, 0)
+                    local offset = headPos - root.Position
+                    local dist = offset.Magnitude
+                    local vel = root.AssemblyLinearVelocity
+
+                    if dist > 2.5 then
+                        local multiplier = STICKY_PULL * 18
+                        local desired = offset.Unit * multiplier
+                        root.AssemblyLinearVelocity = Vector3.new(
+                            vel.X + (desired.X - vel.X) * 0.25,
+                            vel.Y,
+                            vel.Z + (desired.Z - vel.Z) * 0.25
+                        )
+                    end
+
+                    if dist <= 3 then
+                        local centerDir = (headPos - root.Position)
+                        local horizontal = Vector3.new(centerDir.X, 0, centerDir.Z)
+                        root.AssemblyLinearVelocity += horizontal.Unit * (STICKY_POWER * 5)
+                    end
+
+                    if dist <= 2 then
+                        local boostOffset = headPos - root.Position
+                        root.AssemblyLinearVelocity = Vector3.new(
+                            boostOffset.X * (STICKY_POWER * 5),
+                            root.AssemblyLinearVelocity.Y,
+                            boostOffset.Z * (STICKY_POWER * 5)
+                        )
+                    end
+
+                    if dist <= 1.2 then
+                        local lock = headPos - root.Position
+                        root.AssemblyLinearVelocity = Vector3.new(
+                            lock.X * (STICKY_POWER * 6),
+                            root.AssemblyLinearVelocity.Y,
+                            lock.Z * (STICKY_POWER * 6)
+                        )
+                    end
+                end
+            end
+        end
+    end)
+
+    RunService.Heartbeat:Connect(function(dt)
+        if boostCdRemaining > 0 then
+            boostCdRemaining = math.max(0, boostCdRemaining - dt)
+            boostStateLabel.Text = string.format("HEAD BOOST CD: %.1fs", boostCdRemaining)
+            boostStateLabel.TextColor3 = COL_WARN
+        else
+            boostStateLabel.Text = "HEAD BOOST: READY"
+            boostStateLabel.TextColor3 = COL_SUCCESS
+        end
+
+        if not STICKY_HEAD_ENABLED or onBoostCooldown then return end
+
+        local myChar = plr.Character
+        if not myChar then return end
+        local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+        if not myHRP then return end
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p == plr then continue end
+            local char = p.Character
+            if not char then continue end
+
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local theirHead = char:FindFirstChild("Head")
+            if not hum or not theirHead then continue end
+
+            local wasJumping = playerJumpStates[p] or false
+            local isJumping = hum.FloorMaterial == Enum.Material.Air
+
+            if isJumping and not wasJumping then
+                playerJumpTimers[p] = 0.15
+            end
+
+            if playerJumpTimers[p] and playerJumpTimers[p] > 0 then
+                playerJumpTimers[p] = playerJumpTimers[p] - dt
+                if checkFeetOnHead(myHRP, theirHead) then
+                    playerJumpTimers[p] = 0
+                    doHeadBoost(myHRP)
+                end
+            end
+
+            playerJumpStates[p] = isJumping
+        end
+    end)
+
+    Players.PlayerRemoving:Connect(function(p)
+        playerJumpStates[p] = nil
+        playerJumpTimers[p] = nil
+    end)
+
+    -- ── INPUT HANDLING ────────────────────────────────────────────────
+    UserInputService.InputBegan:Connect(function(input, isProcessed)
+        if isProcessed then return end
+        
+        local key = input.KeyCode
+        
+        if key == Enum.KeyCode.V or key == Enum.KeyCode.ButtonL1 then
+            WALK_SPEED_ENABLED = not WALK_SPEED_ENABLED
+            if humanoid then
+                humanoid.WalkSpeed = WALK_SPEED_ENABLED and CUSTOM_WALKSPEED or DEFAULT_WALKSPEED
+            end
+            if refreshSpeedBtn then refreshSpeedBtn() end
+        end
+        
+        if key == Enum.KeyCode.R or key == Enum.KeyCode.ButtonR1 then
+            STICKY_HEAD_ENABLED = not STICKY_HEAD_ENABLED
+            if refreshStickyBtn then refreshStickyBtn() end
+
+            if RANDOM_BOOST_ENABLED then
+                BOOST_POWER = math.random(21, 70)
+                for _, refresh in ipairs(configRefreshers) do
+                    pcall(refresh)
+                end
+            end
+        end
+
+        if key == TOGGLE_KEY or key == Enum.KeyCode.H or key == Enum.KeyCode.LeftControl or key == Enum.KeyCode.ButtonSelect or key == Enum.KeyCode.DPadRight then
+            if panel then
+                panel.Visible = not panel.Visible
+                shadow.Visible = panel.Visible
+            end
+        end
+    end)
+end
+
+
+-- ════════════════════════════════════════════════════════════════════
+--  PART 2 : INTRO SOURCE (fully embedded)
+-- ════════════════════════════════════════════════════════════════════
+local function PlayIntro(callback)
+    local TweenService = game:GetService("TweenService")
+    local Players = game:GetService("Players")
+
+    local player = Players.LocalPlayer
+    local guiParent = (syn and syn.protect_gui and game:GetService("CoreGui")) or (gethui and gethui()) or player:WaitForChild("PlayerGui")
+
+    local introGui = Instance.new("ScreenGui")
+    introGui.Name = "JZHubIntro_Galaxy"
+    introGui.IgnoreGuiInset = true
+    introGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    introGui.Parent = guiParent
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(1, 0, 1, 0)
+    bg.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    bg.BorderSizePixel = 0
+    bg.Parent = introGui
+
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(4, 2, 12)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(26, 11, 46)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(4, 2, 12))
+    })
+    gradient.Rotation = 45
+    gradient.Parent = bg
+
+    for i = 1, 80 do
+        local star = Instance.new("Frame")
+        local size = math.random(1, 3)
+        star.Size = UDim2.new(0, size, 0, size)
+        star.Position = UDim2.new(math.random(), 0, math.random(), 0)
+        star.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        star.BackgroundTransparency = math.random(2, 8) / 10
+        star.BorderSizePixel = 0
+        Instance.new("UICorner", star).CornerRadius = UDim.new(1, 0)
+        star.Parent = bg
+    end
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 100)
+    title.Position = UDim2.new(0, 0, 0.5, -50)
+    title.BackgroundTransparency = 1
+    title.Text = "JZ HUB"
+    title.TextColor3 = Color3.fromRGB(255, 70, 70)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 45
+    title.TextTransparency = 1
+    title.Parent = bg
+
+    local sword = Instance.new("TextLabel")
+    sword.Size = UDim2.new(0, 150, 0, 150)
+    sword.Position = UDim2.new(0.5, -75, -0.2, 0)
+    sword.BackgroundTransparency = 1
+    sword.Text = "🗡️"
+    sword.TextSize = 120
+    sword.Rotation = -45
+    sword.ZIndex = 10
+    sword.Parent = introGui
+
+    local function spawnFlower()
+        -- flowers removed
+    end
+
+    task.spawn(function()
+        TweenService:Create(title, TweenInfo.new(1.5), {TextTransparency = 0}):Play()
+        
+        task.wait(0.5)
+
+        local slashTween = TweenService:Create(sword, TweenInfo.new(0.35, Enum.EasingStyle.Exponential, Enum.EasingDirection.In), {
+            Position = UDim2.new(0.5, -75, 1.2, 0)
+        })
+        slashTween:Play()
+        slashTween.Completed:Wait()
+
+        local flash = Instance.new("Frame")
+        flash.Size = UDim2.new(1, 0, 1, 0)
+        flash.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        flash.ZIndex = 20
+        flash.Parent = introGui
+        TweenService:Create(flash, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
+        game:GetService("Debris"):AddItem(flash, 0.5)
+
+        local leftHalf = Instance.new("Frame")
+        leftHalf.Size = UDim2.new(0.5, 0, 1, 0)
+        leftHalf.Position = UDim2.new(0, 0, 0, 0)
+        leftHalf.ClipsDescendants = true
+        leftHalf.BackgroundTransparency = 1
+        leftHalf.Parent = introGui
+
+        local rightHalf = Instance.new("Frame")
+        rightHalf.Size = UDim2.new(0.5, 0, 1, 0)
+        rightHalf.Position = UDim2.new(0.5, 0, 0, 0)
+        rightHalf.ClipsDescendants = true
+        rightHalf.BackgroundTransparency = 1
+        rightHalf.Parent = introGui
+
+        local bgLeft = bg:Clone()
+        bgLeft.Size = UDim2.new(2, 0, 1, 0)
+        bgLeft.Position = UDim2.new(0, 0, 0, 0)
+        bgLeft.Parent = leftHalf
+
+        local bgRight = bg:Clone()
+        bgRight.Size = UDim2.new(2, 0, 1, 0)
+        bgRight.Position = UDim2.new(-1, 0, 0, 0)
+        bgRight.Parent = rightHalf
+
+        bg:Destroy()
+        sword:Destroy()
+
+        local splitLeft = TweenService:Create(leftHalf, TweenInfo.new(0.8, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {
+            Position = UDim2.new(-0.5, 0, 0, 0)
+        })
+        local splitRight = TweenService:Create(rightHalf, TweenInfo.new(0.8, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {
+            Position = UDim2.new(1, 0, 0, 0)
+        })
+
+        splitLeft:Play()
+        splitRight:Play()
+        splitLeft.Completed:Wait()
+
+        introGui:Destroy()
+
+        if callback then
+            callback()
+        end
+    end)
+end
+
+
+-- ════════════════════════════════════════════════════════════════════
+--  EXECUTION  ──────────────────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════
+if SHOW_INTRO then
+    PlayIntro(LoadMainHub)
+else
+    LoadMainHub()
+end
